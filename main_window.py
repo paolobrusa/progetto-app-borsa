@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QCheckBox, QListWidget, QListWidgetItem,
     QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QFrame,
-    QHeaderView, QSizePolicy, QScrollArea,
+    QHeaderView, QSizePolicy, QScrollArea, QMessageBox,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
@@ -22,6 +22,11 @@ from data import (
 from analysis import enrich_dataframe, find_support_resistance
 from chart import build_chart
 from analysis_engine import generate_analysis, build_analysis_html
+from ai_analyst import (
+    get_api_key, save_api_key,
+    build_prompt, call_gemini, response_to_html,
+    render_conversation_html, call_gemini_followup, build_followup_context,
+)
 
 
 # ── Background workers ───────────────────────────────────────────────────────
@@ -61,9 +66,52 @@ class FundWorker(QThread):
         )
 
 
+class AIWorker(QThread):
+    """Background thread for both initial analysis and follow-up questions."""
+    # (raw_text, followup_question)  — question is "" for the initial analysis
+    finished = pyqtSignal(str, str)
+    error    = pyqtSignal(str)
+
+    def __init__(self, ticker, fundamentals, df, sr, analysts, period, api_key,
+                 followup_question: str = "", api_history: list | None = None):
+        super().__init__()
+        self.ticker            = ticker
+        self.fundamentals      = fundamentals
+        self.df                = df
+        self.sr                = sr
+        self.analysts          = analysts
+        self.period            = period
+        self.api_key           = api_key
+        self.followup_question = followup_question
+        self.api_history       = api_history or []
+
+    def run(self):
+        try:
+            if self.followup_question:
+                # Follow-up: compact history + new question (token-efficient)
+                history = self.api_history + [
+                    {"role": "user", "text": self.followup_question}
+                ]
+                raw_text = call_gemini_followup(history, self.api_key)
+                self.finished.emit(raw_text, self.followup_question)
+            else:
+                # Initial analysis: full prompt
+                prompt   = build_prompt(
+                    self.ticker, self.fundamentals,
+                    self.df, self.sr, self.analysts, self.period,
+                )
+                raw_text = call_gemini(prompt, self.api_key)
+                self.finished.emit(raw_text, "")
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
 # ── Main window ──────────────────────────────────────────────────────────────
 
 _PERIODS = ["1D", "5D", "1M", "3M", "6M", "1Y", "2Y", "5Y", "MAX"]
+
+_AI_BTN_LABEL   = "Genera Analisi AI"
+_AI_BTN_LOADING = "Analisi in corso…"
 
 _INDICATORS = [
     ("MA",    "MA/EMA"),
@@ -86,6 +134,35 @@ font-family:'Segoe UI',Arial;color:#8888aa;">
 <div style="font-size:12px;margin-top:10px;opacity:0.55;">
   Esempi&nbsp;&nbsp;|&nbsp;&nbsp;NVDA &nbsp;&#8226;&nbsp; AAPL &nbsp;&#8226;&nbsp; BTC-USD &nbsp;&#8226;&nbsp; ENI.MI &nbsp;&#8226;&nbsp; EURUSD=X &nbsp;&#8226;&nbsp; SPY
 </div>
+</body></html>"""
+
+_AI_WELCOME_HTML = """<!DOCTYPE html>
+<html><body style="margin:0;background:#0f0f1a;display:flex;align-items:center;
+justify-content:center;height:100%;flex-direction:column;
+font-family:'Segoe UI',Arial;color:#6060a0;text-align:center;padding:30px;">
+<div style="font-size:48px;margin-bottom:16px;">🤖</div>
+<div style="font-size:18px;color:#9090c8;margin-bottom:10px;font-weight:600;">AI Analyst — Google Gemini</div>
+<div style="font-size:13px;color:#5050808;max-width:460px;line-height:1.7;">
+  Carica un ticker, inserisci la tua <b style="color:#7080b0;">Gemini API key</b>
+  (gratuita su <a href="#" style="color:#4090ff;">aistudio.google.com</a>)
+  e premi <b style="color:#80c8ff;">Genera Analisi AI</b> per ottenere un parere
+  completo con notizie in tempo reale, analisi tecnica/fondamentale
+  e strategie operative per breve, medio e lungo termine.
+</div>
+<div style="font-size:11px;margin-top:20px;opacity:0.45;">
+  Powered by Gemini 2.0 Flash &nbsp;·&nbsp; Google Search Grounding &nbsp;·&nbsp; ~1500 analisi/giorno gratuite
+</div>
+</body></html>"""
+
+_AI_LOADING_HTML = """<!DOCTYPE html>
+<html><body style="margin:0;background:#0f0f1a;display:flex;align-items:center;
+justify-content:center;height:100%;flex-direction:column;
+font-family:'Segoe UI',Arial;color:#6868a0;text-align:center;">
+<div style="font-size:40px;margin-bottom:20px;animation:spin 1.5s linear infinite;">⚙️</div>
+<div style="font-size:16px;color:#a0a8d8;margin-bottom:8px;">Analisi in corso…</div>
+<div style="font-size:12px;color:#505080;">Gemini sta cercando notizie aggiornate e analizzando i dati.</div>
+<div style="font-size:11px;margin-top:6px;opacity:0.5;">Può richiedere 15–30 secondi.</div>
+<style>@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}</style>
 </body></html>"""
 
 
@@ -125,6 +202,13 @@ class MainWindow(QMainWindow):
         self._search_worker: SearchWorker | None = None
         self._data_worker:   DataWorker   | None = None
         self._fund_worker:   FundWorker   | None = None
+        self._ai_worker:     AIWorker     | None = None
+
+        # AI conversation state
+        # _ai_api_history: compact history sent to Gemini on follow-ups
+        # _ai_display:     items shown in the view  (role, text)
+        self._ai_api_history: list = []
+        self._ai_display:     list = []
 
         self._search_timer = QTimer()
         self._search_timer.setSingleShot(True)
@@ -250,12 +334,12 @@ class MainWindow(QMainWindow):
     def _build_fund_panel(self) -> QTabWidget:
         self.fund_tabs = QTabWidget()
         self.fund_tabs.setMinimumHeight(160)
-        self.fund_tabs.setMaximumHeight(380)
         self.fund_tabs.addTab(self._build_overview_tab(),   "Panoramica")
         self.fund_tabs.addTab(self._build_financials_tab(), "Bilancio")
         self.fund_tabs.addTab(self._build_dividends_tab(),  "Dividendi")
         self.fund_tabs.addTab(self._build_analysts_tab(),   "Analisti")
-        self.fund_tabs.addTab(self._build_analysis_tab(),   "Analisi & Parere")
+        self.fund_tabs.addTab(self._build_analysis_tab(),   "Analisi e Parere")
+        self.fund_tabs.addTab(self._build_ai_tab(),         "AI Analyst")
         return self.fund_tabs
 
     def _build_overview_tab(self) -> QWidget:
@@ -358,6 +442,120 @@ class MainWindow(QMainWindow):
             "Carica un ticker per vedere l'analisi completa.</body>"
         )
         v.addWidget(self.analysis_browser)
+        return w
+
+    def _build_ai_tab(self) -> QWidget:
+        """Tab with Gemini AI analysis: API key input + generate button + WebView output."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(6)
+
+        # ── Top bar ──────────────────────────────────────────────────────────
+        bar = QWidget()
+        bar.setFixedHeight(38)
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+
+        # Generate button
+        self.ai_btn = QPushButton(_AI_BTN_LABEL)
+        self.ai_btn.setFixedHeight(32)
+        self.ai_btn.setMinimumWidth(180)
+        self.ai_btn.setStyleSheet(
+            "QPushButton { background:#1a3060; border:1px solid #4090ff; border-radius:5px;"
+            " color:#80c8ff; font-size:12px; font-weight:600; }"
+            "QPushButton:hover { background:#203a70; border-color:#60b0ff; }"
+            "QPushButton:disabled { background:#111128; border-color:#2a2a50; color:#404060; }"
+        )
+        self.ai_btn.clicked.connect(self._request_ai_analysis)
+        h.addWidget(self.ai_btn)
+
+        h.addWidget(_sep())
+
+        # API key label + input
+        lbl_key = QLabel("Gemini API key:")
+        lbl_key.setStyleSheet("color:#6868a0; font-size:10px;")
+        lbl_key.setFixedWidth(90)
+        h.addWidget(lbl_key)
+
+        self.ai_key_input = QLineEdit()
+        self.ai_key_input.setPlaceholderText("AIza…  (da aistudio.google.com → Get API Key)")
+        self.ai_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ai_key_input.setFixedHeight(28)
+        self.ai_key_input.setMinimumWidth(260)
+        # Pre-fill if already saved
+        saved_key = get_api_key()
+        if saved_key:
+            self.ai_key_input.setText(saved_key)
+        h.addWidget(self.ai_key_input, 1)
+
+        # Toggle show/hide password
+        self.ai_key_eye = QPushButton("👁")
+        self.ai_key_eye.setFixedSize(28, 28)
+        self.ai_key_eye.setToolTip("Mostra / Nascondi chiave")
+        self.ai_key_eye.setCheckable(True)
+        self.ai_key_eye.toggled.connect(
+            lambda on: self.ai_key_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password
+            )
+        )
+        h.addWidget(self.ai_key_eye)
+
+        # Save key button
+        btn_save = QPushButton("💾 Salva")
+        btn_save.setFixedHeight(28)
+        btn_save.setToolTip("Salva la chiave nel file .env (non la ricordare più)")
+        btn_save.clicked.connect(self._save_ai_key)
+        h.addWidget(btn_save)
+
+        h.addStretch()
+        v.addWidget(bar)
+
+        # ── Status label ─────────────────────────────────────────────────────
+        self.ai_status = QLabel(
+            "Inserisci la tua Gemini API key e premi il pulsante dopo aver caricato un ticker."
+        )
+        self.ai_status.setStyleSheet("color:#5858a0; font-size:10px; padding:0 2px;")
+        self.ai_status.setWordWrap(True)
+        v.addWidget(self.ai_status)
+
+        # ── WebEngineView for rendered response ───────────────────────────────
+        from PyQt6.QtWebEngineCore import QWebEngineSettings
+        self.ai_view = QWebEngineView()
+        self.ai_view.settings().setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+        )
+        self.ai_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.ai_view.setHtml(_AI_WELCOME_HTML)
+        v.addWidget(self.ai_view, stretch=1)
+
+        # ── Follow-up input bar ───────────────────────────────────────────────
+        fu_bar = QWidget()
+        fu_bar.setFixedHeight(38)
+        hf = QHBoxLayout(fu_bar)
+        hf.setContentsMargins(0, 4, 0, 0)
+        hf.setSpacing(6)
+
+        self.ai_followup_input = QLineEdit()
+        self.ai_followup_input.setPlaceholderText(
+            "Genera prima un'analisi, poi scrivi qui le tue domande di approfondimento…"
+        )
+        self.ai_followup_input.setFixedHeight(30)
+        self.ai_followup_input.setEnabled(False)
+        self.ai_followup_input.returnPressed.connect(self._request_ai_followup)
+        hf.addWidget(self.ai_followup_input, 1)
+
+        self.ai_followup_btn = QPushButton("Invia")
+        self.ai_followup_btn.setFixedSize(64, 30)
+        self.ai_followup_btn.setEnabled(False)
+        self.ai_followup_btn.clicked.connect(self._request_ai_followup)
+        hf.addWidget(self.ai_followup_btn)
+
+        v.addWidget(fu_bar)
+
         return w
 
     # ── Styles ───────────────────────────────────────────────────────────────
@@ -466,6 +664,20 @@ class MainWindow(QMainWindow):
         self.price_lbl.setText("")
         self._set_status(f"Scarico dati per {ticker}…")
         self._set_controls_enabled(False)
+
+        # Reset AI conversation for the new ticker
+        self._ai_api_history = []
+        self._ai_display     = []
+        self.ai_view.setHtml(_AI_WELCOME_HTML)
+        self.ai_followup_input.setEnabled(False)
+        self.ai_followup_input.clear()
+        self.ai_followup_input.setPlaceholderText(
+            "Genera prima un'analisi, poi scrivi qui le tue domande di approfondimento…"
+        )
+        self.ai_followup_btn.setEnabled(False)
+        self.ai_status.setText(
+            "Inserisci la tua Gemini API key e premi il pulsante dopo aver caricato un ticker."
+        )
 
         if self._data_worker and self._data_worker.isRunning():
             self._data_worker.terminate()
@@ -628,6 +840,196 @@ class MainWindow(QMainWindow):
                 self.an_table.setItem(r, 1, _cell(str(row.get("Firm", "–"))))
                 self.an_table.setItem(r, 2, _cell(str(row.get("ToGrade", row.get("To Grade", "–")))))
                 self.an_table.setItem(r, 3, _cell(str(row.get("Action", "–"))))
+
+    # ── AI Analyst ───────────────────────────────────────────────────────────
+
+    def _save_ai_key(self):
+        """Persist the API key typed in the input field."""
+        key = self.ai_key_input.text().strip()
+        if not key:
+            self.ai_status.setText("⚠️  Inserisci una API key prima di salvarla.")
+            return
+        save_api_key(key)
+        self.ai_status.setText("✅  API key salvata nel file .env — non dovrai reinserirla.")
+
+    def _request_ai_analysis(self):
+        """Validate state, then launch AIWorker in background."""
+        if self.current_df is None or self.current_ticker is None:
+            self.ai_status.setText("⚠️  Carica prima un ticker dalla barra di ricerca.")
+            return
+
+        api_key = self.ai_key_input.text().strip()
+        if not api_key:
+            self.ai_status.setText(
+                "⚠️  Inserisci la Gemini API key (ottienila gratis su aistudio.google.com)."
+            )
+            return
+
+        # Stop any running worker
+        if self._ai_worker and self._ai_worker.isRunning():
+            self._ai_worker.terminate()
+            self._ai_worker.wait()
+
+        # Show loading state
+        self.ai_btn.setEnabled(False)
+        self.ai_btn.setText(_AI_BTN_LOADING)
+        self.ai_status.setText(
+            f"🔍  Gemini sta ricercando notizie su {self.current_ticker} "
+            f"e analizzando i dati — attendere 15–30 secondi…"
+        )
+        self.ai_view.setHtml(_AI_LOADING_HTML)
+
+        # Switch to AI tab so user sees the spinner
+        self.fund_tabs.setCurrentWidget(self.fund_tabs.widget(5))
+
+        # Reset conversation state for fresh analysis
+        self._ai_api_history = []
+        self._ai_display     = []
+
+        self._ai_worker = AIWorker(
+            ticker       = self.current_ticker,
+            fundamentals = self.current_fundamentals,
+            df           = self.current_df,
+            sr           = self.current_sr or {},
+            analysts     = self.current_analysts,
+            period       = self.current_period,
+            api_key      = api_key,
+        )
+        self._ai_worker.finished.connect(self._on_ai_ready)
+        self._ai_worker.error.connect(self._on_ai_error)
+        self._ai_worker.start()
+
+    def _on_ai_ready(self, raw_text: str, question: str):
+        """
+        Unified handler for both initial analysis and follow-up responses.
+        question is "" for the initial analysis, non-empty for follow-ups.
+        """
+        if question:
+            # Remove the loading placeholder, add the real model response
+            self._ai_display = [i for i in self._ai_display if i["role"] != "loading"]
+            self._ai_display.append({"role": "model", "text": raw_text})
+            # Append to compact API history
+            self._ai_api_history.append({"role": "model", "text": raw_text})
+            self.ai_followup_input.clear()
+            status = "Risposta ricevuta — puoi continuare a fare domande."
+        else:
+            # Initial analysis: build display + compact history for future follow-ups
+            self._ai_display = [{"role": "model", "text": raw_text}]
+            compact_ctx = build_followup_context(
+                self.current_ticker or "",
+                self.current_fundamentals,
+                self.current_period,
+            )
+            self._ai_api_history = [
+                {"role": "user",  "text": compact_ctx},
+                {"role": "model", "text": raw_text},
+            ]
+            # Enable follow-up input now that we have a first response
+            self.ai_followup_input.setEnabled(True)
+            self.ai_followup_btn.setEnabled(True)
+            self.ai_followup_input.setPlaceholderText(
+                "Scrivi una domanda di approfondimento e premi Invio…"
+            )
+            status = (
+                f"Analisi completata per {self.current_ticker} "
+                f"({self.current_period})  —  Gemini 2.5 Flash-Lite + Google Search"
+            )
+
+        html = render_conversation_html(self._ai_display)
+        self.ai_view.setHtml(html)
+        # Scroll to bottom after render
+        self.ai_view.page().runJavaScript(
+            "setTimeout(()=>window.scrollTo(0,document.body.scrollHeight),200)"
+        )
+
+        self.ai_btn.setEnabled(True)
+        self.ai_btn.setText(_AI_BTN_LABEL)
+        self.ai_status.setText(status)
+
+    def _on_ai_error(self, msg: str):
+        """Show error and re-enable all AI controls."""
+        # If a follow-up failed, remove the loading + user turn from display
+        self._ai_display = [i for i in self._ai_display
+                            if i["role"] not in ("loading",)]
+        if self._ai_display and self._ai_display[-1]["role"] == "user":
+            self._ai_display.pop()            # remove pending question
+        if self._ai_api_history and self._ai_api_history[-1]["role"] == "user":
+            self._ai_api_history.pop()        # rollback API history too
+
+        # Append error item and re-render
+        self._ai_display.append({"role": "error", "text": msg})
+        if self._ai_display:
+            self.ai_view.setHtml(render_conversation_html(self._ai_display))
+        else:
+            error_html = (
+                "<html><body style='background:#0f0f1a;color:#f44336;"
+                "font-family:Segoe UI;padding:28px;line-height:1.7;'>"
+                f"<b>Errore:</b> {msg}<br><br>"
+                "<span style='color:#7070a0;font-size:12px;'>"
+                "Possibili cause: API key non valida, quota gratuita esaurita, "
+                "libreria mancante (pip install google-genai), nessuna connessione."
+                "</span></body></html>"
+            )
+            self.ai_view.setHtml(error_html)
+
+        self.ai_btn.setEnabled(True)
+        self.ai_btn.setText(_AI_BTN_LABEL)
+        if self._ai_api_history:           # had a previous successful analysis
+            self.ai_followup_input.setEnabled(True)
+            self.ai_followup_btn.setEnabled(True)
+        self.ai_status.setText(f"Errore: {msg[:120]}{'…' if len(msg) > 120 else ''}")
+
+    def _request_ai_followup(self):
+        """Submit a follow-up question using the compact conversation history."""
+        question = self.ai_followup_input.text().strip()
+        if not question:
+            return
+
+        api_key = self.ai_key_input.text().strip()
+        if not api_key:
+            self.ai_status.setText("Inserisci la Gemini API key prima di fare domande.")
+            return
+
+        if not self._ai_api_history:
+            self.ai_status.setText("Genera prima un'analisi iniziale.")
+            return
+
+        # Stop any running worker
+        if self._ai_worker and self._ai_worker.isRunning():
+            self._ai_worker.terminate()
+            self._ai_worker.wait()
+
+        # Immediately show user question + loading placeholder in the view
+        self._ai_display.append({"role": "user",    "text": question})
+        self._ai_display.append({"role": "loading", "text": ""})
+        self.ai_view.setHtml(render_conversation_html(self._ai_display))
+        self.ai_view.page().runJavaScript(
+            "setTimeout(()=>window.scrollTo(0,document.body.scrollHeight),200)"
+        )
+
+        # Disable inputs while waiting
+        self.ai_followup_input.setEnabled(False)
+        self.ai_followup_btn.setEnabled(False)
+        self.ai_btn.setEnabled(False)
+        self.ai_status.setText(f'Elaboro: "{question[:80]}{"…" if len(question) > 80 else ""}"')
+
+        # Add question to API history (will be rolled back on error)
+        self._ai_api_history.append({"role": "user", "text": question})
+
+        self._ai_worker = AIWorker(
+            ticker            = self.current_ticker,
+            fundamentals      = self.current_fundamentals,
+            df                = self.current_df,
+            sr                = self.current_sr or {},
+            analysts          = self.current_analysts,
+            period            = self.current_period,
+            api_key           = api_key,
+            followup_question = question,
+            api_history       = self._ai_api_history[:-1],  # exclude the just-added question
+        )
+        self._ai_worker.finished.connect(self._on_ai_ready)
+        self._ai_worker.error.connect(self._on_ai_error)
+        self._ai_worker.start()
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
