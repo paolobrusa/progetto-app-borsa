@@ -20,7 +20,7 @@ from data import (
     get_dividends, get_financials, get_analyst_data,
 )
 from analysis import enrich_dataframe, find_support_resistance
-from chart import build_chart
+from chart_lightweight import build_chart
 from analysis_engine import generate_analysis, build_analysis_html
 from ai_analyst import (
     get_api_key, save_api_key,
@@ -911,6 +911,9 @@ class MainWindow(QMainWindow):
             # Append to compact API history
             self._ai_api_history.append({"role": "model", "text": raw_text})
             self.ai_followup_input.clear()
+            # Re-enable follow-up controls after response
+            self.ai_followup_input.setEnabled(True)
+            self.ai_followup_btn.setEnabled(True)
             status = "Risposta ricevuta — puoi continuare a fare domande."
         else:
             # Initial analysis: build display + compact history for future follow-ups

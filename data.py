@@ -17,8 +17,8 @@ PERIOD_INTERVAL_MAP: Dict[str, tuple] = {
     "6M":  ("6mo", "1d"),
     "1Y":  ("1y",  "1d"),
     "2Y":  ("2y",  "1d"),   # daily: ~504 candles, SMA200 computable
-    "5Y":  ("5y",  "1wk"),  # weekly: ~260 candles, SMA200 computable (200wk ≈ 4yr)
-    "MAX": ("max", "1wk"),  # weekly: more candles than monthly, SMA200 more likely valid
+    "5Y":  ("5y",  "1d"),   # daily: candele da 1 giorno
+    "MAX": ("max", "1d"),   # daily: candele da 1 giorno
 }
 
 
