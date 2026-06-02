@@ -139,6 +139,61 @@ def _tech_signals(df: pd.DataFrame, sr: dict, close: float) -> Dict[str, Tuple]:
             else:
                 sigs["OBV (volume)"] = ("NEUTRALE", "neutral", "OBV stabile — nessuna pressione di volume direzionale")
 
+    # CMF — Chaikin Money Flow
+    if "CMF" in df:
+        cmf_s = df["CMF"].dropna()
+        if not cmf_s.empty:
+            cmf_v = float(cmf_s.iloc[-1])
+            if cmf_v > 0.15:
+                sigs["CMF (flusso)"] = ("FORTE ACCUMULO", "bullish", f"CMF={cmf_v:.3f} — forte pressione d'acquisto istituzionale")
+            elif cmf_v > 0.05:
+                sigs["CMF (flusso)"] = ("ACCUMULO", "mild_bullish", f"CMF={cmf_v:.3f} — pressione di acquisto presente")
+            elif cmf_v < -0.15:
+                sigs["CMF (flusso)"] = ("FORTE DISTRIBUZIONE", "bearish", f"CMF={cmf_v:.3f} — forte pressione di vendita istituzionale")
+            elif cmf_v < -0.05:
+                sigs["CMF (flusso)"] = ("DISTRIBUZIONE", "mild_bearish", f"CMF={cmf_v:.3f} — pressione di vendita presente")
+            else:
+                sigs["CMF (flusso)"] = ("NEUTRALE", "neutral", f"CMF={cmf_v:.3f} — flusso di denaro bilanciato")
+
+    # ADX — trend strength
+    if "ADX" in df and "DI_plus" in df and "DI_minus" in df:
+        adx_s = df["ADX"].dropna()
+        dip_s = df["DI_plus"].dropna()
+        dim_s = df["DI_minus"].dropna()
+        if not adx_s.empty and not dip_s.empty and not dim_s.empty:
+            adx_v = float(adx_s.iloc[-1])
+            dip_v = float(dip_s.iloc[-1])
+            dim_v = float(dim_s.iloc[-1])
+            if adx_v > 25 and dip_v > dim_v:
+                sigs["ADX (trend)"] = ("TREND FORTE ↑", "bullish", f"ADX={adx_v:.1f} DI+={dip_v:.1f}>DI-={dim_v:.1f} — trend rialzista solido")
+            elif adx_v > 25 and dim_v > dip_v:
+                sigs["ADX (trend)"] = ("TREND FORTE ↓", "bearish", f"ADX={adx_v:.1f} DI-={dim_v:.1f}>DI+={dip_v:.1f} — trend ribassista solido")
+            elif adx_v > 18:
+                direction = "mild_bullish" if dip_v > dim_v else "mild_bearish"
+                sigs["ADX (trend)"] = ("TREND MODERATO", direction, f"ADX={adx_v:.1f} — trend presente, direzione {'rialzista' if dip_v > dim_v else 'ribassista'}")
+            else:
+                sigs["ADX (trend)"] = ("MERCATO LATERALE", "neutral", f"ADX={adx_v:.1f} — nessun trend definito, indicatori oscillatori meno affidabili")
+
+    # EMA trend stacking (EMA9 > EMA20 > SMA50 = perfetto allineamento rialzista)
+    if "EMA9" in df and "EMA20" in df and "SMA50" in df:
+        e9_s  = df["EMA9"].dropna()
+        e20_s = df["EMA20"].dropna()
+        s50_s = df["SMA50"].dropna()
+        if not e9_s.empty and not e20_s.empty and not s50_s.empty:
+            v9  = float(e9_s.iloc[-1])
+            v20 = float(e20_s.iloc[-1])
+            v50 = float(s50_s.iloc[-1])
+            if close > v9 > v20 > v50:
+                sigs["Trend EMA"] = ("ALLINEAMENTO ↑", "bullish", f"Prezzo>{v9:.2f}>{v20:.2f}>{v50:.2f} — allineamento rialzista perfetto")
+            elif close > v20 and close > v50:
+                sigs["Trend EMA"] = ("TREND POSITIVO", "mild_bullish", f"Prezzo sopra EMA20({v20:.2f}) e SMA50({v50:.2f})")
+            elif close < v9 < v20 < v50:
+                sigs["Trend EMA"] = ("ALLINEAMENTO ↓", "bearish", f"Prezzo<{v9:.2f}<{v20:.2f}<{v50:.2f} — allineamento ribassista")
+            elif close < v20 and close < v50:
+                sigs["Trend EMA"] = ("TREND NEGATIVO", "mild_bearish", f"Prezzo sotto EMA20({v20:.2f}) e SMA50({v50:.2f})")
+            else:
+                sigs["Trend EMA"] = ("MISTO", "neutral", f"EMA non allineate — mercato indeciso ({v9:.2f}/{v20:.2f}/{v50:.2f})")
+
     # Support / Resistance proximity
     if sr:
         resis = [r for r in sr.get("resistance", []) if r > close]
@@ -162,49 +217,69 @@ def _tech_signals(df: pd.DataFrame, sr: dict, close: float) -> Dict[str, Tuple]:
 def _fund_signals(fundamentals: dict, analysts: dict, close: float) -> Dict[str, Tuple]:
     sigs = {}
 
-    # P/E
+    # Posizione nel range 52 settimane (momentum di prezzo)
+    w52h = fundamentals.get("52w_high")
+    w52l = fundamentals.get("52w_low")
+    if w52h and w52l and close and (w52h - w52l) > 0:
+        pos_52 = (close - w52l) / (w52h - w52l) * 100
+        if pos_52 >= 80:
+            sigs["Posizione 52W"] = ("VICINO AI MASSIMI", "bullish", f"Prezzo all'{pos_52:.0f}% del range annuale — forte momentum")
+        elif pos_52 >= 55:
+            sigs["Posizione 52W"] = ("ZONA ALTA", "mild_bullish", f"Prezzo al {pos_52:.0f}% del range annuale — trend positivo")
+        elif pos_52 <= 20:
+            sigs["Posizione 52W"] = ("ZONA MINIMI", "mild_bearish", f"Prezzo al {pos_52:.0f}% del range annuale — debolezza strutturale")
+        else:
+            sigs["Posizione 52W"] = ("ZONA MEDIA", "neutral", f"Prezzo al {pos_52:.0f}% del range annuale")
+
+    # P/E — soglie aggiornate: S&P500 medio attuale = 27, storico 20 anni = 23
     pe = fundamentals.get("pe_ratio")
     if pe and pe > 0:
-        if pe < 10:
-            sigs["P/E Ratio"] = ("MOLTO ECONOMICO", "bullish", f"P/E = {pe:.1f} — titolo potenzialmente sottovalutato")
-        elif pe < 18:
-            sigs["P/E Ratio"] = ("FAIR VALUE", "mild_bullish", f"P/E = {pe:.1f} — valutazione ragionevole")
-        elif pe < 30:
-            sigs["P/E Ratio"] = ("CARO", "mild_bearish", f"P/E = {pe:.1f} — il mercato prezza una crescita elevata")
+        if pe < 13:
+            sigs["P/E Ratio"] = ("MOLTO ECONOMICO", "bullish", f"P/E = {pe:.1f} — titolo sottovalutato rispetto al mercato")
+        elif pe < 22:
+            sigs["P/E Ratio"] = ("FAIR VALUE", "mild_bullish", f"P/E = {pe:.1f} — valutazione sotto la media di mercato (S&P ~27)")
+        elif pe < 35:
+            sigs["P/E Ratio"] = ("NELLA NORMA", "neutral", f"P/E = {pe:.1f} — in linea con la media di mercato attuale")
+        elif pe < 50:
+            sigs["P/E Ratio"] = ("ELEVATO", "mild_bearish", f"P/E = {pe:.1f} — sopra la media, richiede crescita sostenuta")
         else:
-            sigs["P/E Ratio"] = ("MOLTO CARO", "bearish", f"P/E = {pe:.1f} — valutazione storicamente elevata")
+            sigs["P/E Ratio"] = ("MOLTO ELEVATO", "bearish", f"P/E = {pe:.1f} — valutazione da titolo growth aggressivo")
 
-    # Forward P/E
+    # Forward P/E — media S&P500 attuale ~22-24, storica ~17-18
     fpe = fundamentals.get("forward_pe")
     if fpe and fpe > 0:
         if fpe < 15:
-            sigs["P/E Forward"] = ("ECONOMICO", "bullish", f"Forward P/E = {fpe:.1f} — utili futuri attesi elevati")
-        elif fpe < 25:
-            sigs["P/E Forward"] = ("EQUO", "neutral", f"Forward P/E = {fpe:.1f}")
+            sigs["P/E Forward"] = ("MOLTO ECONOMICO", "bullish", f"Forward P/E = {fpe:.1f} — utili futuri molto convenienti vs mercato")
+        elif fpe < 22:
+            sigs["P/E Forward"] = ("ECONOMICO", "mild_bullish", f"Forward P/E = {fpe:.1f} — sotto la media di mercato (~22-24)")
+        elif fpe < 30:
+            sigs["P/E Forward"] = ("EQUO", "neutral", f"Forward P/E = {fpe:.1f} — in linea con la media di mercato")
         else:
-            sigs["P/E Forward"] = ("CARO", "mild_bearish", f"Forward P/E = {fpe:.1f}")
+            sigs["P/E Forward"] = ("CARO", "mild_bearish", f"Forward P/E = {fpe:.1f} — crescita futura già prezzata in anticipo")
 
-    # PEG
+    # PEG — soglie più realistiche: PEG < 1 = ottimo, 1–2 = normale per growth
     peg = fundamentals.get("peg_ratio")
     if peg and peg > 0:
-        if peg < 0.8:
-            sigs["PEG Ratio"] = ("SOTTOVALUTATO", "bullish", f"PEG = {peg:.2f} — crescita non prezzata, opportunità value")
-        elif peg < 1.5:
+        if peg < 1.0:
+            sigs["PEG Ratio"] = ("SOTTOVALUTATO", "bullish", f"PEG = {peg:.2f} — crescita non ancora prezzata, opportunità")
+        elif peg < 2.0:
             sigs["PEG Ratio"] = ("EQUO", "neutral", f"PEG = {peg:.2f} — crescita correttamente prezzata")
+        elif peg < 3.0:
+            sigs["PEG Ratio"] = ("SOPRAVVALUTATO", "mild_bearish", f"PEG = {peg:.2f} — crescita eccessivamente prezzata")
         else:
-            sigs["PEG Ratio"] = ("SOPRAVVALUTATO", "bearish", f"PEG = {peg:.2f} — crescita eccessivamente prezzata")
+            sigs["PEG Ratio"] = ("MOLTO CARO", "bearish", f"PEG = {peg:.2f} — valutazione molto aggressiva")
 
-    # Beta
+    # Beta — indicatore di rischio, non direzionale (non deve abbassare il punteggio buy/sell)
     beta = fundamentals.get("beta")
     if beta:
-        if beta < 0.7:
-            sigs["Beta / Rischio"] = ("DIFENSIVO", "mild_bullish", f"Beta = {beta:.2f} — poco correlato al mercato, basso rischio")
-        elif beta < 1.3:
+        if beta < 0.6:
+            sigs["Beta / Rischio"] = ("MOLTO DIFENSIVO", "mild_bullish", f"Beta = {beta:.2f} — titolo difensivo, bassa correlazione col mercato")
+        elif beta < 1.2:
             sigs["Beta / Rischio"] = ("MODERATO", "neutral", f"Beta = {beta:.2f} — volatilità in linea con il mercato")
-        elif beta < 2:
-            sigs["Beta / Rischio"] = ("AGGRESSIVO", "mild_bearish", f"Beta = {beta:.2f} — più volatile del mercato")
+        elif beta < 2.0:
+            sigs["Beta / Rischio"] = ("AGGRESSIVO", "neutral", f"Beta = {beta:.2f} — più volatile del mercato (normale per titoli growth/tech)")
         else:
-            sigs["Beta / Rischio"] = ("MOLTO RISCHIOSO", "bearish", f"Beta = {beta:.2f} — altamente volatile")
+            sigs["Beta / Rischio"] = ("MOLTO VOLATILE", "mild_bearish", f"Beta = {beta:.2f} — elevata volatilità, gestione rischio essenziale")
 
     # Analyst consensus + target upside
     if analysts:
@@ -244,23 +319,38 @@ _HORIZON_W: Dict[str, Dict[str, float]] = {
     "breve": {
         # Short-term signals amplified
         "RSI": 2.5, "Stocastico": 2.5, "Bollinger": 2.0,
-        "MACD": 1.5, "OBV (volume)": 1.5, "Sup/Res": 2.5, "Volatilità (ATR)": 1.5,
+        "MACD": 1.8, "OBV (volume)": 1.5, "Sup/Res": 2.5, "Volatilità (ATR)": 1.0,
+        "ADX (trend)": 2.0, "Trend EMA": 1.5, "CMF (flusso)": 1.5,
         # Long-term signals muted
-        "SMA 200": 0.2, "Golden/Death Cross": 0.1,
-        # Fundamentals almost irrelevant
+        "SMA 200": 0.3, "Golden/Death Cross": 0.2,
+        # Fundamentals quasi irrilevanti sul breve
         "P/E Ratio": 0.1, "P/E Forward": 0.1, "PEG Ratio": 0.1,
-        "Beta / Rischio": 0.3, "Consenso Analisti": 0.2, "Upside vs Target": 0.1,
+        "Beta / Rischio": 0.1, "Consenso Analisti": 0.3, "Upside vs Target": 0.1,
+        "Posizione 52W": 0.8,
     },
-    "medio": {},   # all 1.0 — balanced
+    "medio": {
+        # Bilanciato con un po' di enfasi sui segnali di trend
+        "MACD": 1.3, "SMA 200": 1.3, "Golden/Death Cross": 1.3,
+        "ADX (trend)": 1.4, "Trend EMA": 1.3, "CMF (flusso)": 1.2,
+        "RSI": 1.1, "OBV (volume)": 1.2,
+        # Fondamentali a peso ridotto nel medio
+        "P/E Ratio": 0.7, "P/E Forward": 0.8, "PEG Ratio": 0.7,
+        "Beta / Rischio": 0.3, "Consenso Analisti": 1.5, "Upside vs Target": 1.3,
+        "Posizione 52W": 1.0,
+    },
     "lungo": {
-        # Short-term signals muted
+        # Short-term signals molto ridotti
         "RSI": 0.2, "Stocastico": 0.1, "Bollinger": 0.3,
-        "MACD": 0.6, "OBV (volume)": 0.7, "Sup/Res": 0.2, "Volatilità (ATR)": 0.2,
+        "Sup/Res": 0.2, "Volatilità (ATR)": 0.1,
+        # Trend signals
+        "MACD": 0.7, "OBV (volume)": 0.8,
+        "ADX (trend)": 1.5, "Trend EMA": 1.2, "CMF (flusso)": 1.0,
         # Long-term signals amplified
-        "SMA 200": 2.0, "Golden/Death Cross": 2.5,
-        # Fundamentals very important
-        "P/E Ratio": 2.0, "P/E Forward": 1.5, "PEG Ratio": 2.5,
-        "Beta / Rischio": 1.5, "Consenso Analisti": 2.5, "Upside vs Target": 2.0,
+        "SMA 200": 2.0, "Golden/Death Cross": 2.0,
+        # Fondamentali importanti ma senza esagerare
+        "P/E Ratio": 1.2, "P/E Forward": 1.0, "PEG Ratio": 1.5,
+        "Beta / Rischio": 0.3, "Consenso Analisti": 2.0, "Upside vs Target": 1.8,
+        "Posizione 52W": 1.2,
     },
 }
 

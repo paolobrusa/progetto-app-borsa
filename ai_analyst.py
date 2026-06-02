@@ -291,7 +291,7 @@ Elenca i **top 4 rischi specifici** per questo titolo in questo momento (non ris
 Raccomandazione chiara:
 **FORTE ACQUISTO** / **ACQUISTO** / **NEUTRALE** / **VENDITA** / **FORTE VENDITA**
 Convinzione: ★★★★★ (1–5 stelle)
-Sintesi della tesi in 3 righe max.
+Sintesi della tesi in 3 righe max. Il verdetto finale deve essere sul lungo termine ovvero 6-12 mesi e sul medio termine, quindi devi farmi due verdetti.
 
 ---
 *Sii specifico e usa prezzi e percentuali precisi. Ogni strategia deve essere immediatamente implementabile da un trader retail.*
