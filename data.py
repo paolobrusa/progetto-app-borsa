@@ -111,8 +111,11 @@ def get_dividends(ticker: str) -> Dict:
                 ex_date = pd.to_datetime(ex_date, unit="s").strftime("%Y-%m-%d")
             except Exception:
                 ex_date = str(ex_date)
+        dy = info.get("dividendYield")
+        if dy is not None and dy > 1:
+            dy = dy / 100
         return {
-            "yield":        info.get("dividendYield"),
+            "yield":        dy,
             "rate":         info.get("dividendRate"),
             "payout_ratio": info.get("payoutRatio"),
             "ex_date":      ex_date,

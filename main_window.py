@@ -480,7 +480,7 @@ class MainWindow(QMainWindow):
         h.addWidget(lbl_key)
 
         self.ai_key_input = QLineEdit()
-        self.ai_key_input.setPlaceholderText("AIza…  (da aistudio.google.com → Get API Key)")
+        self.ai_key_input.setPlaceholderText("Inserisci la tua API key per Gemini (da aistudio.google.com)")
         self.ai_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.ai_key_input.setFixedHeight(28)
         self.ai_key_input.setMinimumWidth(260)
