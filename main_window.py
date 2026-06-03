@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QSizePolicy, QScrollArea, QMessageBox,
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl, QPoint
 from PyQt6.QtGui import QFont, QColor
 
 import pandas as pd
@@ -220,6 +220,17 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._apply_styles()
+        from PyQt6.QtWidgets import QApplication
+        QApplication.instance().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if not self.search_list.isHidden():
+                pos = self.search_list.mapFromGlobal(event.globalPosition().toPoint())
+                if not self.search_list.rect().contains(pos):
+                    self.search_list.setHidden(True)
+        return super().eventFilter(obj, event)
 
     # ── UI construction ──────────────────────────────────────────────────────
 
@@ -233,12 +244,11 @@ class MainWindow(QMainWindow):
         # Top bar
         lay.addWidget(self._build_topbar())
 
-        # Search dropdown (hidden until results arrive)
-        self.search_list = QListWidget()
-        self.search_list.setMaximumHeight(220)
+        # Search dropdown overlay (floats over content, not in layout)
+        self.search_list = QListWidget(root)
+        self.search_list.setMaximumHeight(240)
         self.search_list.setHidden(True)
         self.search_list.itemClicked.connect(self._on_result_clicked)
-        lay.addWidget(self.search_list)
 
         # Controls (period + indicators)
         lay.addWidget(self._build_controls())
@@ -648,7 +658,14 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, r["symbol"])
             self.search_list.addItem(item)
+        pos = self.search_input.mapTo(self.centralWidget(), QPoint(0, self.search_input.height()))
+        self.search_list.move(pos)
+        self.search_list.setFixedWidth(self.search_input.width())
+        row_h = self.search_list.sizeHintForRow(0)
+        visible = min(self.search_list.count(), 6)
+        self.search_list.setFixedHeight(row_h * visible + 6)
         self.search_list.setHidden(False)
+        self.search_list.raise_()
         self._set_status(f"{len(results)} risultati trovati.")
 
     def _on_result_clicked(self, item: QListWidgetItem):
