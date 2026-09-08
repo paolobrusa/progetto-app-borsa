@@ -1,1 +1,1 @@
-Progetto personale di un app interattiva con IA (gemini flash) dove è possibile fare analisi a livello tecnico e fondamentale di qualsiasi azione in borsa per avere un aiuto in piu nel proprio piano di investimento
+# Progetto personale di un app interattiva con IA (gemini flash) dove è possibile fare analisi a livello tecnico e fondamentale di qualsiasi azione in borsa per avere un aiuto in piu nel proprio piano di investimento
